@@ -1,0 +1,338 @@
+---
+title: "Project 3"
+author: "Destiny Rankins"
+format: pdf
+editor: visual
+---
+
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+suppressPackageStartupMessages(library(riskCommunicator))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(tableone))
+suppressPackageStartupMessages(library(pROC))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(DescTools))
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(kableExtra))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(rmarkdown))
+suppressPackageStartupMessages(library(tinytex))
+suppressPackageStartupMessages(library(webshot))
+suppressPackageStartupMessages(library(mice))
+
+data("framingham")
+# The Framingham data has been used to create models for cardiovascular risk.
+# The variable selection and model below are designed to mimic the models used
+# in the paper General Cardiovascular Risk Profile for Use in Primary Care 
+# This paper is available (cvd_risk_profile.pdf) on Canvas.
+
+framingham_df <- framingham %>% select(c(CVD, TIMECVD, SEX, TOTCHOL, AGE,
+                                      SYSBP, DIABP, CURSMOKE, DIABETES, BPMEDS,
+                                      HDLC, BMI))
+framingham_df <- na.omit(framingham_df)
+
+CreateTableOne(data=framingham_df, strata = c("SEX"))
+
+# Get blood pressure based on whether or not on BPMEDS
+framingham_df$SYSBP_UT <- ifelse(framingham_df$BPMEDS == 0, 
+                                 framingham_df$SYSBP, 0)
+framingham_df$SYSBP_T <- ifelse(framingham_df$BPMEDS == 1, 
+                                framingham_df$SYSBP, 0)
+
+# Looking at risk within 15 years - remove censored data
+dim(framingham_df)
+framingham_df <- framingham_df %>%
+  filter(!(CVD == 0 & TIMECVD <= 365*15)) %>%
+  select(-c(TIMECVD))
+dim(framingham_df)
+
+# Filter to each sex
+framingham_df_men <- framingham_df %>% filter(SEX == 1)
+framingham_df_women <- framingham_df %>% filter(SEX == 2)
+
+# Fit models with log transforms for all continuous variables
+mod_both <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+      data= framingham_df, family= "binomial")
+
+mod_men <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+      data= framingham_df_men, family= "binomial")
+
+
+mod_women <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women, family= "binomial")
+
+summary(mod_both)
+summary(mod_men)
+summary(mod_women)
+
+# The NHANES data here finds the same covariates among this national survey data
+suppressPackageStartupMessages(library(nhanesA))
+
+# blood pressure, demographic, bmi, smoking, and hypertension info
+bpx_2017 <- nhanes("BPX_J") %>% 
+  select(SEQN, BPXSY1 ) %>% 
+  rename(SYSBP = BPXSY1)
+demo_2017 <- nhanes("DEMO_J") %>% 
+  select(SEQN, RIAGENDR, RIDAGEYR) %>% 
+  rename(SEX = RIAGENDR, AGE = RIDAGEYR)
+bmx_2017 <- nhanes("BMX_J") %>% 
+  select(SEQN, BMXBMI) %>% 
+  rename(BMI = BMXBMI)
+smq_2017 <- nhanes("SMQ_J") %>%
+  mutate(CURSMOKE = case_when(SMQ040 %in% c(1,2) ~ 1,
+                              SMQ040 == 3 ~ 0, 
+                              SMQ020 == 2 ~ 0)) %>%
+  select(SEQN, CURSMOKE)
+bpq_2017 <- nhanes("BPQ_J") %>% 
+  mutate(BPMEDS = ifelse(BPQ050A == 1, 1, 0)) %>%
+  select(SEQN, BPMEDS) 
+tchol_2017 <- nhanes("TCHOL_J") %>% 
+  select(SEQN, LBXTC) %>% 
+  rename(TOTCHOL = LBXTC)
+hdl_2017 <- nhanes("HDL_J") %>% 
+  select(SEQN, LBDHDD) %>% 
+  rename(HDLC = LBDHDD)
+diq_2017 <- nhanes("DIQ_J") %>% 
+  mutate(DIABETES = case_when(DIQ010 == 1 ~ 1, 
+                              DIQ010 %in% c(2,3) ~ 0, 
+                              TRUE ~ NA)) %>%
+  select(SEQN, DIABETES) 
+
+# Join data from different tables
+df_2017 <- bpx_2017 %>%
+  full_join(demo_2017, by = "SEQN") %>%
+  full_join(bmx_2017, by = "SEQN") %>%
+  full_join(hdl_2017, by = "SEQN") %>%
+  full_join(smq_2017, by = "SEQN") %>%
+  full_join(bpq_2017, by = "SEQN") %>%
+  full_join(tchol_2017, by = "SEQN") %>%
+  full_join(diq_2017, by = "SEQN")
+
+CreateTableOne(data = df_2017, strata = c("SEX"))
+
+# Get blood pressure based on whether or not on BPMEDS
+
+df_2017$SYSBP_UT <- ifelse(df_2017$BPMEDS == 0, df_2017$SYSBP, 0)
+df_2017$SYSBP_T <- ifelse(df_2017$BPMEDS == 1, df_2017$SYSBP, 0)
+```
+
+## Evaluate Model Performance
+
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+# predict model outcomes
+predict_probs_both <- predict(mod_both, type="response")
+predict_probs_mod_women <- predict(mod_women, type="response")
+predict_probs_mod_men <- predict(mod_men, type="response")
+
+# performance evaluation using discrimination, ROC Curve
+par(mfrow=c(1,3))
+
+roc_mod_both <- roc(predictor=predict_probs_both, type="response", 
+                    response=as.factor(framingham_df$CVD), 
+                    levels = c(0,1), direction = "<")
+plot(roc_mod_both, print.auc=TRUE, print.thres = TRUE, main=list("Model Both ROC Curve"))
+
+roc_mod_women <- roc(predictor=predict_probs_mod_women,
+response=as.factor(framingham_df_women$CVD),
+levels = c(0,1), direction = "<")
+plot(roc_mod_women, print.auc=TRUE, print.thres = TRUE, main=list("Model Women ROC Curve"))
+     
+roc_mod_men <- roc(predictor=predict_probs_mod_men,
+response=as.factor(framingham_df_men$CVD),
+levels = c(0,1), direction = "<")
+plot(roc_mod_men, print.auc=TRUE, print.thres = TRUE, main=list("Model Men ROC Curve"))
+
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo = FALSE}
+# logistic calibration metric
+num_cuts <- 10
+mod_both_calib_data <- data.frame(prob = predict_probs_both,
+                         bin = cut(predict_probs_both, breaks = num_cuts),
+                         class = framingham_df$CVD)
+mod_both_calib_data <- mod_both_calib_data %>%
+  group_by(bin) %>%
+  summarize(observed = sum(as.numeric(as.character(class)))/n(),
+            expected = sum(prob)/n(),
+            se = sqrt(observed*(1-observed)/n()))
+
+# calibration plot for logistic        
+mod_both_calib_plot <- ggplot(mod_both_calib_data) + 
+  geom_abline(intercept = 0, slope = 1, color="red") + 
+  geom_errorbar(aes(x = expected, ymin=observed-1.96*se, 
+                    ymax=observed+1.96*se), 
+                colour="black", width=.01)+
+  geom_point(aes(x = expected, y = observed)) +
+  labs(x="Expected Proportion", y="Observed Proportion", title = "Both") +
+  theme_minimal()
+
+# women calibration metrics
+mod_women_calib_data <- data.frame(prob = predict_probs_mod_women,
+                         bin = cut(predict_probs_mod_women, breaks = num_cuts),
+                         class = framingham_df_women$CVD)
+mod_women_calib_data <- mod_women_calib_data %>%
+  group_by(bin) %>%
+  summarize(observed = sum(as.numeric(as.character(class)))/n(),
+            expected = sum(prob)/n(),
+            se = sqrt(observed*(1-observed)/n()))
+
+# calibration plot for lasso        
+mod_women_calib_plot <- ggplot(mod_women_calib_data) + 
+  geom_abline(intercept = 0, slope = 1, color="red") + 
+  geom_errorbar(aes(x = expected, ymin=observed-1.96*se, 
+                    ymax=observed+1.96*se), 
+                colour="black", width=.01)+
+  geom_point(aes(x = expected, y = observed)) +
+  labs(x="Expected Proportion", y="Observed Proportion", title = "women") +
+  theme_minimal()
+
+# ridge calibration metrics
+mod_men_calib_data <- data.frame(prob = predict_probs_mod_men,
+                         bin = cut(predict_probs_mod_men, breaks = num_cuts),
+                         class = framingham_df_men$CVD)
+mod_men_calib_data <- mod_men_calib_data %>%
+  group_by(bin) %>%
+  summarize(observed = sum(as.numeric(as.character(class)))/n(),
+            expected = sum(prob)/n(),
+            se = sqrt(observed*(1-observed)/n()))
+
+# calibration plot for ridge        
+mod_men_calib_plot <- ggplot(mod_men_calib_data) + 
+  geom_abline(intercept = 0, slope = 1, color="red") + 
+  geom_errorbar(aes(x = expected, ymin=observed-1.96*se, 
+                    ymax=observed+1.96*se), 
+                colour="black", width=.01)+
+  geom_point(aes(x = expected, y = observed)) +
+  labs(x="Expected Proportion", y="Observed Proportion", title = "Men") +
+  theme_minimal()
+
+grid.arrange(mod_both_calib_plot, mod_women_calib_plot, mod_men_calib_plot, nrow = 1, ncol = 3)
+
+# performance evaluation using Brier Score
+b1 <- BrierScore(as.numeric(as.character(framingham_df$CVD)), predict_probs_both)
+b2 <- BrierScore(as.numeric(as.character(framingham_df_women$CVD)), predict_probs_mod_women)
+b3 <- BrierScore(as.numeric(as.character(framingham_df_men$CVD)), predict_probs_mod_men)
+brier <- data.frame(Models = c("Model w/ Males & Females", "Model only Females", "Model only Males"),
+  BrierScore = (round(c(b1, b2, b3), 3)))
+kable(brier, caption = "Brier Score Measures", align = "l",digits = 3)
+```
+
+### Methods
+
+#### Model Development
+
+A logistic regression was was built after splitting the Framingham source population data into a training set and test set. Eighty percent of the Framingham data was used for the training set to build the model and twenty percent of the data was used for the test set to evaluate the performance of the model. The model performance assesment included evaluate using discrimination to assess the model's ability to differentiate between positive and negative outcomes and plotting the receiving operating characteristic curve (ROC). Brier score performance was used to measure the accuracy of the predicted probabilities. This measure further helps to assess how well each model's predicted outcome aligns with the actual observed values. Given the focus of this project, only the aforementioned performance measures were used to assess the model's performance.
+
+#### Transportability Analysis
+
+The NHANES target population data subset had about 32% of the missing data. The mice() function in was used to impute five complete data sets and the mean was calculated across the data sets. To estimate how well the model performed in the NHANES target population, the Brier Score or the mean squared error was calculated. The predicted probabilities were calculated using the predict function The Framingham test data set was used
+
+```{r}
+# multiple imputation on target population data
+# impute the data set using the mice package
+df_2017_mice_out <- mice(df_2017, m=5, pri = FALSE, seed=123)
+completedf_2017 <- mice::complete(df_2017_mice_out)
+
+
+# Calculate the average across imputed data sets
+impdf_2017 <- completedf_2017 %>%
+  group_by(SEQN) %>%
+  summarise_all(mean, na.rm = TRUE)
+
+```
+
+```{r}
+#make this example reproducible
+set.seed(1)
+
+#use 80% of dataset as training set and 20% as test set
+sample <- sample(c(TRUE, FALSE), nrow(framingham_df), replace=TRUE, prob=c(0.8,0.2))
+train_df  <- framingham_df[sample, ]
+test_df   <- framingham_df[!sample, ]
+
+model_both <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+      data= train_df, family= "binomial")
+
+# Calculate predicted probabilities for the source test set
+test_predict_probs <- predict(model_both, newdata = test_df, type = "response")
+
+# Calculate Brier score for the source test set
+test_brier <- BrierScore(as.numeric(as.character(test_df$CVD)), test_predict_probs)
+
+# Calculate predicted probabilities for the target population
+target_predict_probs <- predict(model_both, newdata = impdf_2017, type = "response")
+  
+# Calculate Brier score for the target population
+target_brier <- BrierScore(as.numeric(as.character(test_df$CVD)), target_predict_probs)
+ 
+# data frame for Brier Scores
+brierscores <- data.frame(Models = c("Test", "Target"),
+BrierScore = (round(c(test_brier, target_brier), 2)))
+
+# output table for Brier Scores
+kable(brierscores, caption = "Brier Score Measures", align = "l",digits = 2) 
+
+# predict and plot ROC curve for the Framingham data frame test set
+par(mfrow=c(1,2))
+roc_model_both <- roc(predictor=test_predict_probs, type="response", 
+                    response=as.factor(test_df$CVD), 
+                    levels = c(0,1), direction = "<")
+plot(roc_model_both, print.auc=TRUE, print.thres = TRUE, main=list("Model Both ROC Curve"))
+
+# predict and plot ROC curve for the NHANES data frame 
+roc_mod_target <- roc(predictor=target_predict_probs, type="response", 
+                    response=as.factor(test_df$CVD), 
+                    levels = c(0,1), direction = "<")
+plot(roc_mod_target, print.auc=TRUE, print.thres = TRUE, main=list("Target ROC Curve"))
+```
+
+```{r}
+# Function for estimating AUC in target population
+estimate_auc_transportability <- function(model, data_source, data_target) {
+  # model: Logistic regression model fitted on the source population (S=1, D=0)
+  # data_source: Source population data with outcome (Y), covariates (X), and test set indicator (D=1 for test)
+  # data_target: Target population data with covariates (X)
+  
+  # Extract model coefficients
+  beta_hat <- coef(model)
+  
+  # Calculate predicted probabilities for the source test set
+  probabilities_source_test <- predict(model, newdata = data_source, type = "response")
+  
+  # Calculate ROC curve for the source test set
+  roc_source <- roc(data_source$CVD, probabilities_source_test)
+  
+  # Calculate predicted probabilities for the target population
+  probabilities_target <- predict(model, newdata = data_target, type = "response")
+  
+  # Calculate ROC curve for the target population
+  roc_target <- roc(data_target$Y, probabilities_target)
+  
+  # Estimate AUC in the target population
+  auc_target <- auc(roc_target)
+  
+  # Print the result
+  cat("AUC in the Target Population:", auc_target, "\n")
+  
+  # Return the AUC
+  return(auc_target)
+}
+
+# Example usage
+# Assuming 'framingham_df' is your source population data frame (S=1, D=0)
+# Assuming 'df_2017' is your target population data frame (S=0)
+# Assuming 'model' is a logistic regression model trained on the source population
+estimate_auc_transportability(model_both, train_df, impdf_2017)
+```
+
+\newpage
+
+# Code Appendix
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE, include=TRUE}
+```
